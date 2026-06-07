@@ -1,166 +1,397 @@
-<script>
-// ====================== SUPABASE CONFIGURATION ======================
-const SUPABASE_URL = "https://ukfoeorwimvfjmkvbyqz.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_Tru93y3LkdD0II3wIt02dg_3qnlQVm1";
-
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// ====================== APP STATE ======================
-const BASE_TOKENS = 5000;
-const PRICE = 0.10;
-let connected = false;
-let cw = null; // Stores details for active session: { name, addr, type: 'evm' | 'sol' }
-let dbData = { wallets: {} };
-
-// ====================== CORE UTILITIES ======================
-function shortAddr(addr) { 
-    return addr ? addr.slice(0,6)+'...'+addr.slice(-4) : ''; 
-}
-
-function getRefFromURL() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('ref') || null;
-}
-
-function generateRef(addr) {
-    return btoa(addr).replace(/[^a-zA-Z0-9]/g,'').slice(0,10);
-}
-
-// ====================== SUPABASE DATABASE SYNC ======================
-async function loadDB() {
-    try {
-        const { data, error } = await supabase
-            .from('signatures')
-            .select('*')
-            .order('created_at', { ascending: false });
-
-        if (error) throw error;
-
-        dbData.wallets = {};
-        data.forEach(row => {
-            dbData.wallets[row.wallet_address] = {
-                addr: row.wallet_address,
-                ref: generateRef(row.wallet_address),
-                referredBy: row.referred_by, 
-                verifiedAt: row.created_at
-            };
-        });
-
-        updateClaimedCount();
-        console.log(`✅ Loaded ${data.length} wallets from Supabase`);
-    } catch(e) {
-        console.error("Supabase data load failure:", e);
-    }
-}
-
-function updateClaimedCount() {
-    const count = Object.keys(dbData.wallets || {}).length;
-    const el = document.getElementById('lClaimed');
-    if (el) el.textContent = (14382 + count).toLocaleString();
-}
-
-// ====================== CONNECT & SIGN OPERATIONS ======================
-
-// --- EVM / ETH / USDT (MetaMask, Coinbase, etc.) ---
-async function connectEVM() {
-    if (!window.ethereum) {
-        alert("No Web3 wallet detected. Please use MetaMask or an integrated dApp browser.");
-        return;
-    }
-    try {
-        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        const signer = await provider.getSigner();
-        const account = accounts[0];
-
-        cw = { name: "EVM Wallet", addr: account, type: "evm" };
-        
-        const message = `$NEWTOKEN Airdrop Verification\nWallet: ${account}\nDate: ${new Date().toISOString()}\nI confirm ownership over this wallet request.`;
-        const signature = await signer.signMessage(message);
-
-        await saveToDatabase(account.toLowerCase(), signature, message);
-    } catch (e) {
-        console.error("EVM Connection or signing failed:", e);
-        alert("Transaction authorization or verification rejected.");
-    }
-}
-
-// --- SOLANA (Phantom, Solflare) ---
-async function connectSolana() {
-    // Detect Phantom or standard Solana injection provider
-    const isPhantomInstalled = window.solana && window.solana.isPhantom;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$NEWTOKEN Airdrop</title>
     
-    if (!isPhantomInstalled) {
-        alert("Solana wallet extension not detected. Please install Phantom or Solflare.");
-        return;
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.5/ethers.umd.min.js"></script>
+
+    <style>
+        /* ====================== PRESERVING ORIGINAL PREMIUM UI CUSTOM STYLES ====================== */
+        :root {
+            --bg-main: #0b0813;
+            --bg-card: #130f22;
+            --accent-purple: #9d4edd;
+            --text-primary: #ffffff;
+            --text-secondary: #94a3b8;
+            --gradient-btn: linear-gradient(135deg, #7b2cbf 0%, #e0aaff 100%);
+        }
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 40px;
+            border-bottom: 1px solid #1f1a3a;
+        }
+        .logo-area {
+            font-weight: 800;
+            font-size: 20px;
+            background: linear-gradient(to right, #ffffff, #c77dff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin: 0 15px;
+            font-size: 14px;
+        }
+        nav a:hover { color: var(--text-primary); }
+        .connect-btn {
+            background: var(--gradient-btn);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(157, 78, 221, 0.3);
+        }
+        .main-container {
+            max-width: 1200px;
+            margin: 60px auto;
+            text-align: center;
+            padding: 0 20px;
+        }
+        .tagline-badge {
+            background: rgba(157, 78, 221, 0.15);
+            border: 1px solid var(--accent-purple);
+            color: #e0aaff;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            display: inline-block;
+            margin-bottom: 24px;
+        }
+        h1 {
+            font-size: 56px;
+            font-weight: 800;
+            margin: 0 0 20px 0;
+            line-height: 1.1;
+        }
+        h1 span {
+            background: linear-gradient(135deg, #b5179e, #7209b7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 18px;
+            max-width: 600px;
+            margin: 0 auto 40px auto;
+        }
+        .claim-hero-btn {
+            background: var(--gradient-btn);
+            color: white;
+            border: none;
+            padding: 16px 40px;
+            font-size: 18px;
+            font-weight: 700;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+        .claim-hero-btn:hover { transform: scale(1.02); }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-top: 60px;
+        }
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid #241c3f;
+            border-radius: 12px;
+            padding: 24px;
+        }
+        .stat-val { font-size: 28px; font-weight: 700; color: #ffffff; }
+        .stat-lbl { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; margin-top: 4px; }
+        .wallet-selection-section { margin-top: 50px; }
+        .wallet-list-container {
+            max-width: 500px;
+            margin: 20px auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .wallet-row {
+            background: var(--bg-card);
+            border: 1px solid #241c3f;
+            padding: 16px 24px;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+        .wallet-row:hover { border-color: var(--accent-purple); }
+        .wallet-info { display: flex; align-items: center; gap: 15px; }
+        .wallet-icon { font-size: 24px; }
+        .wallet-meta h4 { margin: 0; font-size: 16px; font-weight: 600; text-align: left; }
+        .wallet-meta p { margin: 2px 0 0 0; font-size: 12px; color: var(--text-secondary); text-align: left; }
+        .badge { background: #1f173a; color: #c77dff; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+        .hidden { display: none !important; }
+        .dashboard-view { background: var(--bg-card); border: 1px solid #241c3f; border-radius: 16px; max-width: 600px; margin: 40px auto; padding: 40px; text-align: left; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-area">⬢ $NEWTOKEN</div>
+        <nav>
+            <a href="#">Home</a>
+            <a href="#">Dashboard</a>
+            <a href="#">FAQ</a>
+        </nav>
+        <div id="navBtn">
+            <button class="connect-btn" onclick="scrollToWallets()">Connect Wallet</button>
+        </div>
+    </header>
+
+    <div class="main-container">
+        
+        <div id="screen-home">
+            <div class="tagline-badge">● Official Airdrop • Live Now</div>
+            <h1>Official <span>$NEWTOKEN</span><br>Airdrop — Claim Now</h1>
+            <p class="subtitle">Connect your multi-chain wallet, verify signature metrics, and extract your allocations securely.</p>
+            
+            <button class="claim-hero-btn" id="mainClaimBtn" onclick="scrollToWallets()">Connect Wallet & Claim →</button>
+
+            <div class="stats-grid">
+                <div class="stat-card"><div class="stat-val">$4M</div><div class="stat-lbl">Total Value</div></div>
+                <div class="stat-card"><div class="stat-val" id="lClaimed">14,382</div><div class="stat-lbl">Claimed</div></div>
+                <div class="stat-card"><div class="stat-val">5,000</div><div class="stat-lbl">Base Tokens</div></div>
+                <div class="stat-card"><div class="stat-val">Aug 1</div><div class="stat-lbl">Drop Date</div></div>
+            </div>
+
+            <div class="wallet-selection-section" id="walletSelection">
+                <h3 style="color: var(--text-secondary); font-size: 14px; letter-spacing: 2px; text-transform: uppercase;">Choose Your Wallet</h3>
+                <div class="wallet-list-container">
+                    
+                    <div class="wallet-row" onclick="connectEVM()">
+                        <div class="wallet-info">
+                            <span class="wallet-icon">🦊</span>
+                            <div class="wallet-meta"><h4>MetaMask</h4><p>Ethereum • EVM Chains</p></div>
+                        </div>
+                        <span class="badge">Popular</span>
+                    </div>
+
+                    <div class="wallet-row" onclick="connectSolana()">
+                        <div class="wallet-info">
+                            <span class="wallet-icon">👻</span>
+                            <div class="wallet-meta"><h4>Phantom</h4><p>Solana • Ethereum</p></div>
+                        </div>
+                        <span class="badge">Popular</span>
+                    </div>
+
+                    <div class="wallet-row" onclick="connectSolana()">
+                        <div class="wallet-info">
+                            <span class="wallet-icon">🔥</span>
+                            <div class="wallet-meta"><h4>Solflare</h4><p>Native Solana Wallet</p></div>
+                        </div>
+                        <span class="badge" style="color: #ffb703;">Solana</span>
+                    </div>
+
+                    <div class="wallet-row" onclick="connectEVM()">
+                        <div class="wallet-info">
+                            <span class="wallet-icon">🔵</span>
+                            <div class="wallet-meta"><h4>Coinbase Wallet</h4><p>Self-Custody • EVM</p></div>
+                        </div>
+                        <span class="badge" style="color: #24a0ed;">EVM</span>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <div id="screen-dashboard" class="dashboard-view hidden">
+            <h2 style="margin-top:0;">🎉 Airdrop Allocation Confirmed</h2>
+            <p style="color: var(--text-secondary);">Your registration signature has been securely timestamped and tracked in our central registry.</p>
+            <hr style="border-color: #241c3f; margin: 24px 0;">
+            
+            <p><strong>Connected Network Profile:</strong> <span id="dWalletName" style="color: #c77dff;">-</span></p>
+            <p><strong>Registered Public Address:</strong> <span id="dWalletAddr" style="font-family: monospace; background: #1c1635; padding: 4px 8px; border-radius: 4px;">-</span></p>
+            <p><strong>Base Rewards Pending:</strong> <span style="color: #4CAF50; font-weight: bold;">5,000 $NEWTOKEN ($500 Value)</span></p>
+            
+            <div style="margin-top: 30px; background: rgba(157, 78, 221, 0.1); border: 1px dashed var(--accent-purple); padding: 20px; border-radius: 8px;">
+                <h4 style="margin: 0 0 8px 0; color: #e0aaff;">Your Unique Referral Link</h4>
+                <p style="margin: 0 0 12px 0; font-size: 13px; color: var(--text-secondary);">Earn bonus allocation tokens for every user who registers under your invite profile link.</p>
+                <div id="invLink" style="word-break: break-all; color: #24a0ed; font-weight: bold; font-family: monospace;">Loading...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+    // Supabase Connections
+    const SUPABASE_URL = "https://ukfoeorwimvfjmkvbyqz.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_Tru93y3LkdD0II3wIt02dg_3qnlQVm1";
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Initial Global Configurations
+    let connected = false;
+    let cw = null; 
+    let dbData = { wallets: {} };
+
+    function scrollToWallets() {
+        document.getElementById('walletSelection').scrollIntoView({ behavior: 'smooth' });
     }
 
-    try {
-        // Connect to the Solana provider
-        const resp = await window.solana.connect();
-        const walletAddress = resp.publicKey.toString();
-
-        cw = { name: "Solana Wallet", addr: walletAddress, type: "sol" };
-
-        const textMessage = `$NEWTOKEN Airdrop Verification\nWallet: ${walletAddress}\nDate: ${new Date().toISOString()}\nI confirm ownership over this wallet request.`;
-        const encodedMessage = new TextEncoder().encode(textMessage);
-        
-        // Request signature via Solana runtime
-        const signedMessage = await window.solana.signMessage(encodedMessage, "utf8");
-        
-        // Convert the Uint8Array signature back to a standard string format for storage
-        const signatureString = btoa(String.fromCharCode.apply(null, signedMessage.signature));
-
-        await saveToDatabase(walletAddress, signatureString, textMessage);
-    } catch (e) {
-        console.error("Solana connection or signing failed:", e);
-        alert("Solana authorization or verification rejected.");
+    function shortAddr(addr) { 
+        return addr ? addr.slice(0,6)+'...'+addr.slice(-4) : ''; 
     }
-}
 
-// ====================== DATABASE STORAGE HANDLER ======================
-async function saveToDatabase(address, signature, message) {
-    try {
-        const { error } = await supabase
-            .from('signatures')
-            .insert({
-                wallet_address: address,
-                signature: signature,
-                message: message,
-                referred_by: getRefFromURL()
+    function getRefFromURL() {
+        const params = new URLSearchParams(window.location.search);
+        return params.get('ref') || null;
+    }
+
+    function generateRef(addr) {
+        return btoa(addr).replace(/[^a-zA-Z0-9]/g,'').slice(0,10);
+    }
+
+    // Pull rows to parse real-time baseline counters
+    async function loadDB() {
+        try {
+            const { data, error } = await supabase
+                .from('signatures')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+
+            dbData.wallets = {};
+            data.forEach(row => {
+                dbData.wallets[row.wallet_address] = {
+                    addr: row.wallet_address,
+                    ref: generateRef(row.wallet_address),
+                    referredBy: row.referred_by, 
+                    verifiedAt: row.created_at
+                };
             });
 
-        if (error) throw error;
-
-        await onVerified();
-    } catch (e) {
-        console.error("Database entry exception:", e);
+            updateClaimedCount();
+            console.log(`✅ Loaded ${data.length} records successfully.`);
+        } catch(e) {
+            console.error("Initialization Sync Error:", e);
+        }
     }
-}
 
-async function onVerified() {
-    connected = true;
-    const refCode = generateRef(cw.addr);
-    await loadDB();
+    function updateClaimedCount() {
+        const count = Object.keys(dbData.wallets || {}).length;
+        const el = document.getElementById('lClaimed');
+        if (el) el.textContent = (14382 + count).toLocaleString();
+    }
 
-    // Dynamically updates your interface buttons across UI states
-    const navBtn = document.getElementById('navBtn');
-    if (navBtn) navBtn.innerHTML = `<button class="connect-btn">✅ ${shortAddr(cw.addr)}</button>`;
-    
-    const mainBtn = document.getElementById('mainClaimBtn');
-    if (mainBtn) mainBtn.innerHTML = `<span>Airdrop Verified</span>`;
+    // --- EVM / ETH / USDT Engine Execution Block ---
+    async function connectEVM() {
+        if (!window.ethereum) {
+            alert("Web3 provider context absent. Please connect via MetaMask extension or specialized dApp Web3 shell.");
+            return;
+        }
+        try {
+            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+            const provider = new ethers.BrowserProvider(window.ethereum);
+            const signer = await provider.getSigner();
+            const account = accounts[0];
 
-    const linkEl = document.getElementById('invLink');
-    if (linkEl) {
+            cw = { name: "Ethereum / EVM Identity", addr: account, type: "evm" };
+            
+            const message = `$NEWTOKEN Airdrop Verification\nWallet: ${account}\nDate: ${new Date().toISOString()}\nI confirm ownership over this wallet request.`;
+            const signature = await signer.signMessage(message);
+
+            await saveToDatabase(account.toLowerCase(), signature, message);
+        } catch (e) {
+            console.error("EVM Context Error:", e);
+            alert("Verification operation declined.");
+        }
+    }
+
+    // --- SOLANA / SOL Engine Execution Block ---
+    async function connectSolana() {
+        const isSolanaAvailable = window.solana;
+        if (!isSolanaAvailable) {
+            alert("Solana environment context absent. Please access via Phantom or Solflare integrated plugin adapters.");
+            return;
+        }
+        try {
+            const resp = await window.solana.connect();
+            const walletAddress = resp.publicKey.toString();
+
+            cw = { name: "Solana Network Profile", addr: walletAddress, type: "sol" };
+
+            const textMessage = `$NEWTOKEN Airdrop Verification\nWallet: ${walletAddress}\nDate: ${new Date().toISOString()}\nI confirm ownership over this wallet request.`;
+            const encodedMessage = new TextEncoder().encode(textMessage);
+            
+            const signedMessage = await window.solana.signMessage(encodedMessage, "utf8");
+            const signatureString = btoa(String.fromCharCode.apply(null, signedMessage.signature));
+
+            await saveToDatabase(walletAddress, signatureString, textMessage);
+        } catch (e) {
+            console.error("Solana Context Error:", e);
+            alert("Solana verification operation declined.");
+        }
+    }
+
+    // Write verified wallet objects cleanly to Supabase signatures database table
+    async function saveToDatabase(address, signature, message) {
+        try {
+            const { error } = await supabase
+                .from('signatures')
+                .insert({
+                    wallet_address: address,
+                    signature: signature,
+                    message: message,
+                    referred_by: getRefFromURL()
+                });
+
+            if (error) throw error;
+            await renderVerifiedDashboard();
+        } catch (e) {
+            console.error("Database Save Failure:", e);
+            alert("Critical Error: Database storage blocked. Verify RLS Policies.");
+        }
+    }
+
+    // Toggle panels cleanly while mapping custom dashboard details
+    async function renderVerifiedDashboard() {
+        connected = true;
+        const refCode = generateRef(cw.addr);
+        await loadDB();
+
+        // Convert page element triggers safely without blank page drops
+        const navBtn = document.getElementById('navBtn');
+        if (navBtn) navBtn.innerHTML = `<button class="connect-btn" style="background:#4CAF50;">✅ ${shortAddr(cw.addr)}</button>`;
+        
+        const mainBtn = document.getElementById('mainClaimBtn');
+        if (mainBtn) {
+            mainBtn.disabled = true;
+            mainBtn.style.background = "#241c3f";
+            mainBtn.innerHTML = `<span>Allocation Verified</span>`;
+        }
+
+        document.getElementById('dWalletName').textContent = cw.name;
+        document.getElementById('dWalletAddr').textContent = cw.addr;
+
         const inviteURL = window.location.origin + window.location.pathname + '?ref=' + refCode;
-        linkEl.textContent = inviteURL;
+        document.getElementById('invLink').textContent = inviteURL;
+
+        document.getElementById('screen-home').classList.add('hidden');
+        document.getElementById('screen-dashboard').classList.remove('hidden');
     }
 
-    if (typeof showScreen === "function") {
-        showScreen('dashboard');
-    }
-}
-
-// ====================== INITIALIZE APPLICATION ======================
-loadDB();
-</script>
+    // Application Initialization Entry
+    loadDB();
+    </script>
+</body>
+</html>
